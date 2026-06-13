@@ -43,6 +43,11 @@
 #define WM_APP_CONNECTION_ENDED (WM_APP + 4)
 #define WM_APP_SERVER_STOPPED (WM_APP + 5)
 
+#define REGISTRY_OK 0
+#define REGISTRY_DOMAIN_EXISTS 1
+#define REGISTRY_PORT_EXISTS 2
+#define REGISTRY_WRITE_ERROR 3
+
 typedef enum {
     APP_MODE_MENU,
     APP_MODE_SERVER,
@@ -306,6 +311,34 @@ static int registry_lookup_domain_unlocked(const char *domain, int *port)
     return 0;
 }
 
+static int registry_lookup_port_unlocked(int port, char *domain_buffer, int domain_buffer_size)
+{
+    char registry_path[MAX_PATH];
+    FILE *registry_file;
+    char line[256];
+    char stored_domain[128];
+    int stored_port;
+
+    get_registry_file_path(registry_path, sizeof(registry_path));
+    registry_file = fopen(registry_path, "r");
+
+    if (registry_file == NULL) {
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), registry_file) != NULL) {
+        if (sscanf(line, "%127[^|]|%d", stored_domain, &stored_port) == 2 &&
+            stored_port == port) {
+            lstrcpyn(domain_buffer, stored_domain, domain_buffer_size);
+            fclose(registry_file);
+            return 1;
+        }
+    }
+
+    fclose(registry_file);
+    return 0;
+}
+
 static int registry_lookup_domain(const char *domain, int *port)
 {
     int found;
@@ -322,11 +355,17 @@ static int registry_register_domain(const char *domain, int port)
     char registry_path[MAX_PATH];
     FILE *registry_file;
     int existing_port = 0;
+    char existing_domain[128];
     HANDLE mutex_handle = lock_registry();
 
     if (registry_lookup_domain_unlocked(domain, &existing_port)) {
         unlock_registry(mutex_handle);
-        return 0;
+        return REGISTRY_DOMAIN_EXISTS;
+    }
+
+    if (registry_lookup_port_unlocked(port, existing_domain, sizeof(existing_domain))) {
+        unlock_registry(mutex_handle);
+        return REGISTRY_PORT_EXISTS;
     }
 
     get_registry_file_path(registry_path, sizeof(registry_path));
@@ -334,13 +373,13 @@ static int registry_register_domain(const char *domain, int port)
 
     if (registry_file == NULL) {
         unlock_registry(mutex_handle);
-        return 0;
+        return REGISTRY_WRITE_ERROR;
     }
 
     fprintf(registry_file, "%s|%d\n", domain, port);
     fclose(registry_file);
     unlock_registry(mutex_handle);
-    return 1;
+    return REGISTRY_OK;
 }
 
 static void registry_unregister_domain(const char *domain)
@@ -497,7 +536,7 @@ static int create_listener_socket(int port, SOCKET *listener_socket)
 {
     SOCKET socket_descriptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     struct sockaddr_in server_address;
-    int reuse_address_enabled = 1;
+    int exclusive_address_enabled = 1;
 
     if (socket_descriptor == INVALID_SOCKET) {
         return 0;
@@ -505,9 +544,9 @@ static int create_listener_socket(int port, SOCKET *listener_socket)
 
     setsockopt(socket_descriptor,
                SOL_SOCKET,
-               SO_REUSEADDR,
-               (const char *)&reuse_address_enabled,
-               sizeof(reuse_address_enabled));
+               SO_EXCLUSIVEADDRUSE,
+               (const char *)&exclusive_address_enabled,
+               sizeof(exclusive_address_enabled));
 
     memset(&server_address, 0, sizeof(server_address));
     server_address.sin_family = AF_INET;
@@ -560,6 +599,7 @@ static void start_server(void)
     char domain[128];
     char port_text[32];
     int port;
+    int registry_result;
     SOCKET listener_socket;
     char status_message[256];
 
@@ -572,8 +612,20 @@ static void start_server(void)
         return;
     }
 
-    if (!registry_register_domain(domain, port)) {
+    registry_result = registry_register_domain(domain, port);
+
+    if (registry_result == REGISTRY_DOMAIN_EXISTS) {
         MessageBox(g_app.window, "Ya existe un servidor registrado con ese dominio.", APP_TITLE, MB_ICONWARNING);
+        return;
+    }
+
+    if (registry_result == REGISTRY_PORT_EXISTS) {
+        MessageBox(g_app.window, "Ya existe un servidor registrado con ese puerto. Use otro puerto.", APP_TITLE, MB_ICONWARNING);
+        return;
+    }
+
+    if (registry_result != REGISTRY_OK) {
+        MessageBox(g_app.window, "No se pudo registrar el servidor local.", APP_TITLE, MB_ICONERROR);
         return;
     }
 

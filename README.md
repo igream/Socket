@@ -24,6 +24,8 @@ En MSYS2 MINGW64, `make` tambien genera:
 build/socket_gui.exe
 ```
 
+En la GUI, cada servidor local debe usar un dominio y puerto unicos.
+
 Mensajes especiales:
 
 - `FIN`: termina la conexion actual.
