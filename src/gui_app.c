@@ -2,30 +2,47 @@
 #error "La interfaz grafica requiere Windows/MSYS2 MINGW64."
 #endif
 
+/* Directivas de Windows para ventana nativa, controles y sockets Winsock. */
 #include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h>
 
+/* Directivas estandar usadas para buffers, memoria y cadenas. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/* Datos basicos de la ventana principal. */
 #define APP_CLASS_NAME "SocketGuiAppWindow"
 #define APP_TITLE "Socket GUI"
 
+/* Valores iniciales visibles en los campos de dominio y puerto. */
 #define DEFAULT_DOMAIN "local"
 #define DEFAULT_PORT "5000"
+
+/*
+ * Registro local de servidores.
+ * Se guarda en una ruta temporal para que varias instancias de la app
+ * puedan descubrir servidores por dominio sin usar servicios externos.
+ */
 #define REGISTRY_MUTEX_NAME "Local\\SocketGuiRegistryMutex"
 #define REGISTRY_FILE_NAME "socket_gui_servers.txt"
 
+/* Tamano maximo de mensaje ASCII y cola de clientes pendientes. */
 #define MESSAGE_BUFFER_SIZE 1024
 #define PENDING_CONNECTIONS 5
 
+/*
+ * Mensajes internos del protocolo grafico.
+ * No se muestran como texto crudo al usuario; sirven para distinguir
+ * atencion, desconexion normal y apagado del servidor.
+ */
 #define SERVER_READY_NOTICE "__SERVIDOR_ATENDIENDO__"
 #define CLIENT_DISCONNECT_NOTICE "__CLIENTE_TERMINO_CONEXION__"
 #define SERVER_DISCONNECT_NOTICE "__SERVIDOR_TERMINO_CONEXION__"
 #define SERVER_SHUTDOWN_NOTICE "__SERVIDOR_APAGANDO__"
 
+/* Identificadores de controles Win32 usados en WM_COMMAND. */
 #define ID_DOMAIN_EDIT 1001
 #define ID_PORT_EDIT 1002
 #define ID_CREATE_SERVER_BUTTON 1003
@@ -37,24 +54,33 @@
 #define ID_LOG_EDIT 1009
 #define ID_STATUS_STATIC 1010
 
+/* Mensajes privados para comunicar hilos de sockets con el hilo de UI. */
 #define WM_APP_APPEND_LOG (WM_APP + 1)
 #define WM_APP_SET_STATUS (WM_APP + 2)
 #define WM_APP_CLIENT_READY (WM_APP + 3)
 #define WM_APP_CONNECTION_ENDED (WM_APP + 4)
 #define WM_APP_SERVER_STOPPED (WM_APP + 5)
 
+/* Resultados posibles al registrar dominio/puerto localmente. */
 #define REGISTRY_OK 0
 #define REGISTRY_DOMAIN_EXISTS 1
 #define REGISTRY_PORT_EXISTS 2
 #define REGISTRY_WRITE_ERROR 3
 
+/* Modo actual de la instancia grafica. */
 typedef enum {
     APP_MODE_MENU,
     APP_MODE_SERVER,
     APP_MODE_CLIENT
 } AppMode;
 
+/*
+ * Estado completo de la aplicacion grafica.
+ * Los nombres indican su responsabilidad: controles visuales, modo actual,
+ * sockets, hilos, banderas de ejecucion y datos del servidor/cliente activo.
+ */
 typedef struct {
+    /* Ventana principal y controles de interfaz. */
     HWND window;
     HWND domain_edit;
     HWND port_edit;
@@ -66,21 +92,29 @@ typedef struct {
     HWND shutdown_button;
     HWND log_edit;
     HWND status_static;
+
+    /* Estado funcional de la instancia. */
     AppMode mode;
     SOCKET listener_socket;
     SOCKET active_socket;
     HANDLE listener_thread;
     HANDLE receiver_thread;
     CRITICAL_SECTION socket_lock;
+
+    /* Banderas de control entre UI e hilos de red. */
     int server_running;
     int connection_active;
     int client_is_attended;
+
+    /* Datos del dominio/puerto elegido por esta instancia. */
     char current_domain[128];
     int current_port;
 } AppState;
 
+/* Estado global unico de esta instancia de ventana. */
 static AppState g_app;
 
+/* Duplica texto para pasarlo de forma segura por PostMessage(). */
 static char *duplicate_text(const char *text)
 {
     size_t length = strlen(text) + 1;
@@ -93,16 +127,19 @@ static char *duplicate_text(const char *text)
     return copy;
 }
 
+/* Publica una linea de log desde cualquier hilo hacia el hilo de ventana. */
 static void post_log(const char *text)
 {
     PostMessage(g_app.window, WM_APP_APPEND_LOG, 0, (LPARAM)duplicate_text(text));
 }
 
+/* Publica un cambio de estado desde cualquier hilo hacia la UI. */
 static void post_status(const char *text)
 {
     PostMessage(g_app.window, WM_APP_SET_STATUS, 0, (LPARAM)duplicate_text(text));
 }
 
+/* Agrega una linea al cuadro de historial de mensajes. */
 static void append_log_text(const char *text)
 {
     int current_length = GetWindowTextLength(g_app.log_edit);
@@ -112,11 +149,13 @@ static void append_log_text(const char *text)
     SendMessage(g_app.log_edit, EM_REPLACESEL, FALSE, (LPARAM)"\r\n");
 }
 
+/* Cambia el texto de estado visible debajo de los controles principales. */
 static void set_status_text(const char *text)
 {
     SetWindowText(g_app.status_static, text);
 }
 
+/* Habilita controles del menu inicial: crear servidor o conectarse. */
 static void set_controls_for_menu(void)
 {
     EnableWindow(g_app.domain_edit, TRUE);
@@ -129,6 +168,7 @@ static void set_controls_for_menu(void)
     EnableWindow(g_app.shutdown_button, FALSE);
 }
 
+/* Estado visual del cliente cuando ya conecto pero aun espera atencion. */
 static void set_controls_for_waiting_client(void)
 {
     EnableWindow(g_app.domain_edit, FALSE);
@@ -141,6 +181,7 @@ static void set_controls_for_waiting_client(void)
     EnableWindow(g_app.shutdown_button, FALSE);
 }
 
+/* Estado visual de conversacion activa. */
 static void set_controls_for_chat(AppMode mode)
 {
     EnableWindow(g_app.domain_edit, FALSE);
@@ -153,6 +194,7 @@ static void set_controls_for_chat(AppMode mode)
     EnableWindow(g_app.shutdown_button, mode == APP_MODE_SERVER);
 }
 
+/* Estado visual del servidor activo sin cliente atendido. */
 static void set_controls_for_server_waiting(void)
 {
     EnableWindow(g_app.domain_edit, FALSE);
@@ -165,12 +207,14 @@ static void set_controls_for_server_waiting(void)
     EnableWindow(g_app.shutdown_button, TRUE);
 }
 
+/* Lee texto de un control EDIT asegurando terminacion nula. */
 static void get_control_text(HWND control, char *buffer, int buffer_size)
 {
     GetWindowText(control, buffer, buffer_size);
     buffer[buffer_size - 1] = '\0';
 }
 
+/* Valida que el mensaje use solo ASCII basico. */
 static int message_is_ascii(const char *message)
 {
     const unsigned char *current_character = (const unsigned char *)message;
@@ -186,6 +230,7 @@ static int message_is_ascii(const char *message)
     return 1;
 }
 
+/* Detecta mensajes internos del protocolo de la GUI. */
 static int message_is_control(const char *message)
 {
     return strcmp(message, SERVER_READY_NOTICE) == 0 ||
@@ -194,6 +239,7 @@ static int message_is_control(const char *message)
            strcmp(message, SERVER_SHUTDOWN_NOTICE) == 0;
 }
 
+/* Cierra un socket ya protegido por socket_lock. */
 static void close_socket_locked(SOCKET socket_to_close)
 {
     if (socket_to_close != INVALID_SOCKET) {
@@ -202,6 +248,7 @@ static void close_socket_locked(SOCKET socket_to_close)
     }
 }
 
+/* Cierra la conexion activa y actualiza banderas compartidas. */
 static void close_active_connection(void)
 {
     EnterCriticalSection(&g_app.socket_lock);
@@ -214,6 +261,7 @@ static void close_active_connection(void)
     LeaveCriticalSection(&g_app.socket_lock);
 }
 
+/* Espera brevemente a un hilo y libera su handle. */
 static void close_thread_handle(HANDLE *thread_handle)
 {
     if (*thread_handle != NULL) {
@@ -223,6 +271,11 @@ static void close_thread_handle(HANDLE *thread_handle)
     }
 }
 
+/*
+ * Envia un texto por el socket activo.
+ * Usa socket_lock porque el hilo de UI y los hilos de red pueden tocar
+ * active_socket al mismo tiempo.
+ */
 static int send_text_to_active_socket(const char *message)
 {
     int send_result;
@@ -240,6 +293,7 @@ static int send_text_to_active_socket(const char *message)
     return send_result != SOCKET_ERROR;
 }
 
+/* Obtiene la ruta del archivo temporal donde se registran dominio y puerto. */
 static void get_registry_file_path(char *path_buffer, DWORD path_buffer_size)
 {
     DWORD temp_length = GetTempPath(path_buffer_size, path_buffer);
@@ -252,6 +306,7 @@ static void get_registry_file_path(char *path_buffer, DWORD path_buffer_size)
     lstrcat(path_buffer, REGISTRY_FILE_NAME);
 }
 
+/* Obtiene la ruta del archivo temporal usado para reescribir el registro. */
 static void get_registry_temp_file_path(char *path_buffer, DWORD path_buffer_size)
 {
     DWORD temp_length = GetTempPath(path_buffer_size, path_buffer);
@@ -264,6 +319,10 @@ static void get_registry_temp_file_path(char *path_buffer, DWORD path_buffer_siz
     lstrcat(path_buffer, "socket_gui_servers.tmp");
 }
 
+/*
+ * Bloquea el registro local para que varias instancias no escriban
+ * socket_gui_servers.txt al mismo tiempo.
+ */
 static HANDLE lock_registry(void)
 {
     HANDLE mutex_handle = CreateMutex(NULL, FALSE, REGISTRY_MUTEX_NAME);
@@ -275,6 +334,7 @@ static HANDLE lock_registry(void)
     return mutex_handle;
 }
 
+/* Libera el mutex del registro local. */
 static void unlock_registry(HANDLE mutex_handle)
 {
     if (mutex_handle != NULL) {
@@ -283,6 +343,10 @@ static void unlock_registry(HANDLE mutex_handle)
     }
 }
 
+/*
+ * Busca un dominio en el registro.
+ * Esta version asume que el mutex ya fue tomado por el llamador.
+ */
 static int registry_lookup_domain_unlocked(const char *domain, int *port)
 {
     char registry_path[MAX_PATH];
@@ -311,6 +375,10 @@ static int registry_lookup_domain_unlocked(const char *domain, int *port)
     return 0;
 }
 
+/*
+ * Busca si un puerto ya esta registrado por otro servidor.
+ * Evita que dos dominios distintos apunten al mismo 127.0.0.1:puerto.
+ */
 static int registry_lookup_port_unlocked(int port, char *domain_buffer, int domain_buffer_size)
 {
     char registry_path[MAX_PATH];
@@ -339,6 +407,7 @@ static int registry_lookup_port_unlocked(int port, char *domain_buffer, int doma
     return 0;
 }
 
+/* Busca el puerto asociado a un dominio tomando y liberando el mutex. */
 static int registry_lookup_domain(const char *domain, int *port)
 {
     int found;
@@ -350,6 +419,10 @@ static int registry_lookup_domain(const char *domain, int *port)
     return found;
 }
 
+/*
+ * Registra un servidor local.
+ * Falla si ya existe el dominio o si otro dominio ya usa el mismo puerto.
+ */
 static int registry_register_domain(const char *domain, int port)
 {
     char registry_path[MAX_PATH];
@@ -382,6 +455,7 @@ static int registry_register_domain(const char *domain, int port)
     return REGISTRY_OK;
 }
 
+/* Elimina del registro el dominio del servidor que se apago. */
 static void registry_unregister_domain(const char *domain)
 {
     char registry_path[MAX_PATH];
@@ -427,6 +501,11 @@ static void registry_unregister_domain(const char *domain)
     unlock_registry(mutex_handle);
 }
 
+/*
+ * Hilo del servidor grafico.
+ * Espera clientes con accept(), atiende uno a la vez y deja a los demas
+ * en la cola de listen() hasta que el cliente actual termine.
+ */
 static DWORD WINAPI server_listener_thread(LPVOID parameter)
 {
     (void)parameter;
@@ -486,6 +565,10 @@ static DWORD WINAPI server_listener_thread(LPVOID parameter)
     return 0;
 }
 
+/*
+ * Hilo del cliente grafico.
+ * Recibe mensajes del servidor y actualiza la UI mediante PostMessage().
+ */
 static DWORD WINAPI client_receiver_thread(LPVOID parameter)
 {
     SOCKET client_socket = (SOCKET)parameter;
@@ -532,6 +615,10 @@ static DWORD WINAPI client_receiver_thread(LPVOID parameter)
     return 0;
 }
 
+/*
+ * Crea el socket pasivo del servidor.
+ * SO_EXCLUSIVEADDRUSE impide que dos servidores usen el mismo puerto.
+ */
 static int create_listener_socket(int port, SOCKET *listener_socket)
 {
     SOCKET socket_descriptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -567,6 +654,7 @@ static int create_listener_socket(int port, SOCKET *listener_socket)
     return 1;
 }
 
+/* Crea el socket del cliente y solicita conexion al servidor local. */
 static int create_client_socket(const char *host, int port, SOCKET *client_socket)
 {
     SOCKET socket_descriptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -594,6 +682,7 @@ static int create_client_socket(const char *host, int port, SOCKET *client_socke
     return 1;
 }
 
+/* Lee dominio/puerto de la UI, registra el servidor y empieza a escuchar. */
 static void start_server(void)
 {
     char domain[128];
@@ -657,6 +746,7 @@ static void start_server(void)
     append_log_text(status_message);
 }
 
+/* Conecta esta instancia como cliente al servidor registrado por dominio. */
 static void connect_client(void)
 {
     char domain[128];
@@ -702,6 +792,10 @@ static void connect_client(void)
     append_log_text(status_message);
 }
 
+/*
+ * Cierra la conexion actual sin cerrar necesariamente la aplicacion.
+ * En modo servidor vuelve a esperar clientes; en modo cliente regresa al menu.
+ */
 static void disconnect_current_connection(void)
 {
     if (g_app.mode == APP_MODE_SERVER) {
@@ -730,6 +824,10 @@ static void disconnect_current_connection(void)
     }
 }
 
+/*
+ * Apaga el servidor completo.
+ * Libera el dominio registrado para que otra instancia pueda crearlo de nuevo.
+ */
 static void shutdown_server(void)
 {
     if (g_app.mode != APP_MODE_SERVER) {
@@ -756,6 +854,12 @@ static void shutdown_server(void)
     append_log_text("Servidor apagado.");
 }
 
+/*
+ * Toma el texto del cuadro de mensaje y decide si es:
+ * - APAGAR: apagar servidor.
+ * - FIN: terminar conexion actual.
+ * - texto normal: enviarlo por TCP.
+ */
 static void send_message_from_ui(void)
 {
     char message[MESSAGE_BUFFER_SIZE];
@@ -794,6 +898,7 @@ static void send_message_from_ui(void)
     SetWindowText(g_app.message_edit, "");
 }
 
+/* Crea todos los controles visuales de la ventana principal. */
 static void create_controls(HWND window)
 {
     CreateWindow("STATIC", "Dominio:", WS_CHILD | WS_VISIBLE, 16, 18, 70, 22, window, NULL, NULL, NULL);
@@ -828,6 +933,11 @@ static void create_controls(HWND window)
     set_controls_for_menu();
 }
 
+/*
+ * Procedimiento principal de ventana.
+ * Recibe eventos de botones, eventos de cierre y mensajes privados enviados
+ * desde los hilos de red para actualizar la interfaz de forma segura.
+ */
 static LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
     switch (message) {
@@ -908,6 +1018,11 @@ static LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM wpara
     }
 }
 
+/*
+ * Punto de entrada de la aplicacion grafica Win32.
+ * Inicializa Winsock, registra la clase de ventana, crea la UI y arranca
+ * el ciclo de mensajes de Windows.
+ */
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int show_command)
 {
     WNDCLASS window_class;
