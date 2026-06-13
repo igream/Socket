@@ -15,7 +15,7 @@ void initialize_socket_library(void)
 #ifdef _WIN32
     WSADATA socket_library_data;
 
-    if (WSAStartup(MAKEWORD(2, 2), &socket_library_data) != 0) {
+    if (WSAStartup(MAKEWORD(2, 2), &socket_library_data) != 0) { /* WSAStartup(): inicializa Winsock antes de usar sockets en Windows. */
         fprintf(stderr, "[TCP] No se pudo inicializar Winsock.\n");
         exit(EXIT_FAILURE);
     }
@@ -25,7 +25,7 @@ void initialize_socket_library(void)
 void cleanup_socket_library(void)
 {
 #ifdef _WIN32
-    WSACleanup();
+    WSACleanup(); /* WSACleanup(): libera Winsock cuando ya no se usaran sockets en Windows. */
 #endif
 }
 
@@ -115,8 +115,7 @@ void *receive_messages(void *argument)
     char received_message[MESSAGE_BUFFER_SIZE];
 
     while (*(context->connection_active)) {
-        /* recv(): recibe mensajes ASCII desde la conexion TCP. */
-        int received_bytes = recv(context->socket_descriptor,
+        int received_bytes = recv(context->socket_descriptor, /* recv(): recibe mensajes ASCII desde la conexion TCP. */
                                   received_message,
                                   sizeof(received_message) - 1,
                                   0);
@@ -179,7 +178,7 @@ void send_messages(SocketDescriptor socket_descriptor,
             strcmp(message_to_send, SERVER_SHUTDOWN_COMMAND) == 0) {
             message_payload = SERVER_SHUTDOWN_NOTICE;
 
-            if (send(socket_descriptor, message_payload, strlen(message_payload), 0) == -1) {
+            if (send(socket_descriptor, message_payload, strlen(message_payload), 0) == -1) { /* send(): envia aviso de apagado al otro extremo TCP. */
                 perror("[TCP] Error al enviar aviso de apagado del servidor");
             }
 
@@ -196,7 +195,7 @@ void send_messages(SocketDescriptor socket_descriptor,
         if (message_is_end_signal(message_to_send)) {
             message_payload = select_disconnect_notice(local_role);
 
-            if (send(socket_descriptor, message_payload, strlen(message_payload), 0) == -1) {
+            if (send(socket_descriptor, message_payload, strlen(message_payload), 0) == -1) { /* send(): envia aviso de desconexion al otro extremo TCP. */
                 perror("[TCP] Error al enviar aviso de desconexion");
             }
 
@@ -212,8 +211,7 @@ void send_messages(SocketDescriptor socket_descriptor,
 
         message_payload = message_to_send;
 
-        /* send(): envia el mensaje ASCII por la conexion TCP ya establecida. */
-        if (send(socket_descriptor, message_payload, strlen(message_payload), 0) == -1) {
+        if (send(socket_descriptor, message_payload, strlen(message_payload), 0) == -1) { /* send(): envia el mensaje ASCII por la conexion TCP ya establecida. */
             perror("[TCP] Error al enviar mensaje");
             *connection_active = 0;
             break;
@@ -241,9 +239,9 @@ void close_socket_safely(SocketDescriptor socket_descriptor)
 {
     if (socket_descriptor != INVALID_SOCKET_DESCRIPTOR) {
 #ifdef _WIN32
-        closesocket(socket_descriptor);
+        closesocket(socket_descriptor); /* closesocket(): libera el descriptor del socket en Windows. */
 #else
-        close(socket_descriptor);
+        close(socket_descriptor); /* close(): libera el descriptor del socket en sistemas POSIX. */
 #endif
     }
 }
@@ -253,9 +251,9 @@ void shutdown_socket_safely(SocketDescriptor socket_descriptor)
 {
     if (socket_descriptor != INVALID_SOCKET_DESCRIPTOR) {
 #ifdef _WIN32
-        shutdown(socket_descriptor, SD_BOTH);
+        shutdown(socket_descriptor, SD_BOTH); /* shutdown(): avisa que ya no se enviara ni recibira por el socket en Windows. */
 #else
-        shutdown(socket_descriptor, SHUT_RDWR);
+        shutdown(socket_descriptor, SHUT_RDWR); /* shutdown(): avisa que ya no se enviara ni recibira por el socket en POSIX. */
 #endif
     }
 }

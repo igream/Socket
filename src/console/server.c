@@ -28,8 +28,7 @@
  */
 static SocketDescriptor create_server_socket(int server_port)
 {
-    /* socket(): crea el punto inicial de comunicacion TCP del servidor. */
-    SocketDescriptor server_socket_descriptor = socket(AF_INET, SOCK_STREAM, 0);
+    SocketDescriptor server_socket_descriptor = socket(AF_INET, SOCK_STREAM, 0); /* socket(): crea el punto inicial de comunicacion TCP del servidor. */
     struct sockaddr_in server_address;
     int reuse_address_enabled = 1;
 
@@ -37,8 +36,7 @@ static SocketDescriptor create_server_socket(int server_port)
         exit_with_error("[TCP] No se pudo crear el socket del servidor");
     }
 
-    /* setsockopt(): permite reutilizar el puerto durante pruebas sucesivas. */
-    if (setsockopt(server_socket_descriptor,
+    if (setsockopt(server_socket_descriptor, /* setsockopt(): permite reutilizar el puerto durante pruebas sucesivas. */
                    SOL_SOCKET,
                    SO_REUSEADDR,
 #ifdef _WIN32
@@ -56,14 +54,12 @@ static SocketDescriptor create_server_socket(int server_port)
     server_address.sin_addr.s_addr = htonl(INADDR_ANY);
     server_address.sin_port = htons(server_port);
 
-    /* bind(): asigna direccion IP y puerto al socket del servidor. */
-    if (bind(server_socket_descriptor, (struct sockaddr *)&server_address, sizeof(server_address)) == -1) {
+    if (bind(server_socket_descriptor, (struct sockaddr *)&server_address, sizeof(server_address)) == -1) { /* bind(): asigna direccion IP y puerto al socket del servidor. */
         close_socket_safely(server_socket_descriptor);
         exit_with_error("[TCP] No se pudo asociar IP y puerto con bind");
     }
 
-    /* listen(): coloca el socket en modo pasivo, esperando clientes. */
-    if (listen(server_socket_descriptor, PENDING_CONNECTIONS) == -1) {
+    if (listen(server_socket_descriptor, PENDING_CONNECTIONS) == -1) { /* listen(): coloca el socket en modo pasivo, esperando clientes. */
         close_socket_safely(server_socket_descriptor);
         exit_with_error("[TCP] No se pudo activar listen");
     }
@@ -84,8 +80,7 @@ static SocketDescriptor wait_for_client_connection(SocketDescriptor server_socke
     socklen_t client_address_size = sizeof(client_address);
 #endif
 
-    /* accept(): acepta una solicitud de conexion y crea un socket dedicado. */
-    SocketDescriptor connection_socket_descriptor = accept(server_socket_descriptor,
+    SocketDescriptor connection_socket_descriptor = accept(server_socket_descriptor, /* accept(): acepta una solicitud de conexion y crea un socket dedicado. */
                                                            (struct sockaddr *)&client_address,
                                                            &client_address_size);
 

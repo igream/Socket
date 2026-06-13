@@ -26,8 +26,7 @@
  */
 static SocketDescriptor create_client_socket(const char *server_ip, int server_port)
 {
-    /* socket(): crea el punto de comunicacion TCP del cliente. */
-    SocketDescriptor client_socket_descriptor = socket(AF_INET, SOCK_STREAM, 0);
+    SocketDescriptor client_socket_descriptor = socket(AF_INET, SOCK_STREAM, 0); /* socket(): crea el punto de comunicacion TCP del cliente. */
     struct sockaddr_in server_address;
 
     if (client_socket_descriptor == INVALID_SOCKET_DESCRIPTOR) {
@@ -38,13 +37,12 @@ static SocketDescriptor create_client_socket(const char *server_ip, int server_p
     server_address.sin_family = AF_INET;
     server_address.sin_port = htons(server_port);
 
-    if (inet_pton(AF_INET, server_ip, &server_address.sin_addr) <= 0) {
+    if (inet_pton(AF_INET, server_ip, &server_address.sin_addr) <= 0) { /* inet_pton(): convierte la IP escrita a formato binario para sockaddr_in. */
         close_socket_safely(client_socket_descriptor);
         exit_with_error("[TCP] La direccion IP del servidor no es valida");
     }
 
-    /* connect(): solicita establecer conexion con el servidor TCP. */
-    if (connect(client_socket_descriptor, (struct sockaddr *)&server_address, sizeof(server_address)) == -1) {
+    if (connect(client_socket_descriptor, (struct sockaddr *)&server_address, sizeof(server_address)) == -1) { /* connect(): solicita establecer conexion con el servidor TCP. */
         close_socket_safely(client_socket_descriptor);
         exit_with_error("[TCP] No se pudo conectar con el servidor");
     }

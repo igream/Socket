@@ -226,7 +226,7 @@ static int send_text_to_active_socket(const char *message)
         return 0;
     }
 
-    send_result = send(g_app.active_socket, message, (int)strlen(message), 0);
+    send_result = send(g_app.active_socket, message, (int)strlen(message), 0); /* send(): transmite texto por la conexion TCP activa. */
     LeaveCriticalSection(&g_app.socket_lock);
 
     return send_result != SOCKET_ERROR;
@@ -244,7 +244,7 @@ static int can_open_server_port(int port)
         return 0;
     }
 
-    closesocket(probe_socket);
+    closesocket(probe_socket); /* closesocket(): libera el socket usado solo para probar disponibilidad del puerto. */
     return 1;
 }
 
@@ -265,7 +265,7 @@ static DWORD WINAPI server_listener_thread(LPVOID parameter)
     (void)parameter;
 
     while (g_app.server_running) {
-        SOCKET client_socket = accept(g_app.listener_socket, NULL, NULL);
+        SOCKET client_socket = accept(g_app.listener_socket, NULL, NULL); /* accept(): acepta un cliente en espera y crea su socket dedicado. */
         char log_message[256];
         char receive_buffer[MESSAGE_BUFFER_SIZE];
         int received_bytes;
@@ -283,10 +283,10 @@ static DWORD WINAPI server_listener_thread(LPVOID parameter)
         post_log(log_message);
         post_status("Cliente conectado. Puede enviar mensajes.");
         PostMessage(g_app.window, WM_APP_CLIENT_READY, APP_MODE_SERVER, 0);
-        send(client_socket, SERVER_READY_NOTICE, (int)strlen(SERVER_READY_NOTICE), 0);
+        send(client_socket, SERVER_READY_NOTICE, (int)strlen(SERVER_READY_NOTICE), 0); /* send(): avisa al cliente que ya esta siendo atendido. */
 
         while (g_app.server_running && g_app.connection_active) {
-            received_bytes = recv(client_socket, receive_buffer, sizeof(receive_buffer) - 1, 0);
+            received_bytes = recv(client_socket, receive_buffer, sizeof(receive_buffer) - 1, 0); /* recv(): recibe mensajes del cliente atendido. */
 
             if (received_bytes <= 0) {
                 post_log("El cliente cerro la conexion sin aviso.");
@@ -330,7 +330,7 @@ static DWORD WINAPI client_receiver_thread(LPVOID parameter)
     int received_bytes;
 
     while (g_app.connection_active) {
-        received_bytes = recv(client_socket, receive_buffer, sizeof(receive_buffer) - 1, 0);
+        received_bytes = recv(client_socket, receive_buffer, sizeof(receive_buffer) - 1, 0); /* recv(): recibe mensajes del servidor conectado. */
 
         if (received_bytes <= 0) {
             post_log("El servidor no esta disponible o cerro la conexion.");
@@ -496,7 +496,7 @@ static void start_server(void)
     g_app.listener_thread = CreateThread(NULL, 0, server_listener_thread, NULL, 0, NULL);
 
     if (g_app.listener_thread == NULL) {
-        closesocket(listener_socket);
+        closesocket(listener_socket); /* closesocket(): libera el socket servidor si falla crear el hilo. */
         g_app.listener_socket = INVALID_SOCKET;
         g_app.server_running = 0;
         registry_unregister_domain(domain);
@@ -606,7 +606,7 @@ static void shutdown_server(void)
     close_active_connection();
 
     if (g_app.listener_socket != INVALID_SOCKET) {
-        closesocket(g_app.listener_socket);
+        closesocket(g_app.listener_socket); /* closesocket(): cierra el socket pasivo para dejar de aceptar clientes. */
         g_app.listener_socket = INVALID_SOCKET;
     }
 
@@ -773,7 +773,7 @@ static LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM wpara
         close_thread_handle(&g_app.listener_thread);
         close_thread_handle(&g_app.receiver_thread);
         DeleteCriticalSection(&g_app.socket_lock);
-        WSACleanup();
+        WSACleanup(); /* WSACleanup(): libera Winsock al cerrar la ventana. */
         PostQuitMessage(0);
         return 0;
 
@@ -796,7 +796,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
     (void)previous_instance;
     (void)command_line;
 
-    if (WSAStartup(MAKEWORD(2, 2), &winsock_data) != 0) {
+    if (WSAStartup(MAKEWORD(2, 2), &winsock_data) != 0) { /* WSAStartup(): inicializa Winsock antes de crear sockets GUI. */
         MessageBox(NULL, "No se pudo inicializar Winsock.", APP_TITLE, MB_ICONERROR);
         return 1;
     }
@@ -816,7 +816,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
 
     if (!RegisterClass(&window_class)) {
         MessageBox(NULL, "No se pudo registrar la ventana.", APP_TITLE, MB_ICONERROR);
-        WSACleanup();
+        WSACleanup(); /* WSACleanup(): libera Winsock si falla registrar la ventana. */
         return 1;
     }
 
@@ -834,7 +834,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
 
     if (g_app.window == NULL) {
         MessageBox(NULL, "No se pudo crear la ventana.", APP_TITLE, MB_ICONERROR);
-        WSACleanup();
+        WSACleanup(); /* WSACleanup(): libera Winsock si falla crear la ventana. */
         return 1;
     }
 
