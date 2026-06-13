@@ -25,10 +25,12 @@ RM := rm -rf
 MKDIR := mkdir -p
 endif
 
-COMMON_SOURCES := $(SRC_DIR)/messaging.c
-SERVER_SOURCES := $(SRC_DIR)/server.c $(COMMON_SOURCES)
-CLIENT_SOURCES := $(SRC_DIR)/client.c $(COMMON_SOURCES)
-GUI_SOURCES := $(SRC_DIR)/gui_app.c
+CONSOLE_DIR := $(SRC_DIR)/console
+
+COMMON_SOURCES := $(CONSOLE_DIR)/messaging.c
+SERVER_SOURCES := $(CONSOLE_DIR)/server.c $(COMMON_SOURCES)
+CLIENT_SOURCES := $(CONSOLE_DIR)/client.c $(COMMON_SOURCES)
+GUI_SOURCES := $(SRC_DIR)/gui/gui_app.c $(SRC_DIR)/gui/gui_network.c $(SRC_DIR)/gui/gui_registry.c
 
 .PHONY: all clean run-server run-client
 

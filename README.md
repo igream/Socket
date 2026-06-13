@@ -4,10 +4,8 @@ Aplicacion cliente-servidor en C con sockets TCP para mensajeria ASCII full-dupl
 
 Incluye:
 
-- `src/gui_app.c`: aplicacion grafica local para crear servidor o entrar como cliente.
-- `src/server.c`: servidor TCP.
-- `src/client.c`: cliente TCP.
-- `src/messaging.c` y `src/messaging.h`: envio, recepcion, validacion ASCII y cierre.
+- `src/gui/`: aplicacion grafica local, registro de dominios y sockets GUI.
+- `src/console/`: servidor y cliente de terminal.
 - `Makefile`: compilacion y ejecucion.
 
 Comandos:

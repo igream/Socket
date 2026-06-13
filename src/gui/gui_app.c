@@ -2,7 +2,12 @@
 #error "La interfaz grafica requiere Windows/MSYS2 MINGW64."
 #endif
 
-/* Directivas de Windows para ventana nativa, controles y sockets Winsock. */
+/* Capas propias de la aplicacion grafica. */
+#include "gui_network.h"
+#include "gui_protocol.h"
+#include "gui_registry.h"
+
+/* Directivas de Windows para ventana nativa y controles. */
 #include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h>
@@ -19,28 +24,6 @@
 /* Valores iniciales visibles en los campos de dominio y puerto. */
 #define DEFAULT_DOMAIN "local"
 #define DEFAULT_PORT "5000"
-
-/*
- * Registro local de servidores.
- * Se guarda en una ruta temporal para que varias instancias de la app
- * puedan descubrir servidores por dominio sin usar servicios externos.
- */
-#define REGISTRY_MUTEX_NAME "Local\\SocketGuiRegistryMutex"
-#define REGISTRY_FILE_NAME "socket_gui_servers.txt"
-
-/* Tamano maximo de mensaje ASCII y cola de clientes pendientes. */
-#define MESSAGE_BUFFER_SIZE 1024
-#define PENDING_CONNECTIONS 5
-
-/*
- * Mensajes internos del protocolo grafico.
- * No se muestran como texto crudo al usuario; sirven para distinguir
- * atencion, desconexion normal y apagado del servidor.
- */
-#define SERVER_READY_NOTICE "__SERVIDOR_ATENDIENDO__"
-#define CLIENT_DISCONNECT_NOTICE "__CLIENTE_TERMINO_CONEXION__"
-#define SERVER_DISCONNECT_NOTICE "__SERVIDOR_TERMINO_CONEXION__"
-#define SERVER_SHUTDOWN_NOTICE "__SERVIDOR_APAGANDO__"
 
 /* Identificadores de controles Win32 usados en WM_COMMAND. */
 #define ID_DOMAIN_EDIT 1001
@@ -60,19 +43,6 @@
 #define WM_APP_CLIENT_READY (WM_APP + 3)
 #define WM_APP_CONNECTION_ENDED (WM_APP + 4)
 #define WM_APP_SERVER_STOPPED (WM_APP + 5)
-
-/* Resultados posibles al registrar dominio/puerto localmente. */
-#define REGISTRY_OK 0
-#define REGISTRY_DOMAIN_EXISTS 1
-#define REGISTRY_PORT_EXISTS 2
-#define REGISTRY_WRITE_ERROR 3
-
-/* Modo actual de la instancia grafica. */
-typedef enum {
-    APP_MODE_MENU,
-    APP_MODE_SERVER,
-    APP_MODE_CLIENT
-} AppMode;
 
 /*
  * Estado completo de la aplicacion grafica.
@@ -214,46 +184,12 @@ static void get_control_text(HWND control, char *buffer, int buffer_size)
     buffer[buffer_size - 1] = '\0';
 }
 
-/* Valida que el mensaje use solo ASCII basico. */
-static int message_is_ascii(const char *message)
-{
-    const unsigned char *current_character = (const unsigned char *)message;
-
-    while (*current_character != '\0') {
-        if (*current_character > 127) {
-            return 0;
-        }
-
-        current_character++;
-    }
-
-    return 1;
-}
-
-/* Detecta mensajes internos del protocolo de la GUI. */
-static int message_is_control(const char *message)
-{
-    return strcmp(message, SERVER_READY_NOTICE) == 0 ||
-           strcmp(message, CLIENT_DISCONNECT_NOTICE) == 0 ||
-           strcmp(message, SERVER_DISCONNECT_NOTICE) == 0 ||
-           strcmp(message, SERVER_SHUTDOWN_NOTICE) == 0;
-}
-
-/* Cierra un socket ya protegido por socket_lock. */
-static void close_socket_locked(SOCKET socket_to_close)
-{
-    if (socket_to_close != INVALID_SOCKET) {
-        shutdown(socket_to_close, SD_BOTH);
-        closesocket(socket_to_close);
-    }
-}
-
 /* Cierra la conexion activa y actualiza banderas compartidas. */
 static void close_active_connection(void)
 {
     EnterCriticalSection(&g_app.socket_lock);
 
-    close_socket_locked(g_app.active_socket);
+    gui_close_socket(g_app.active_socket);
     g_app.active_socket = INVALID_SOCKET;
     g_app.connection_active = 0;
     g_app.client_is_attended = 0;
@@ -291,214 +227,6 @@ static int send_text_to_active_socket(const char *message)
     LeaveCriticalSection(&g_app.socket_lock);
 
     return send_result != SOCKET_ERROR;
-}
-
-/* Obtiene la ruta del archivo temporal donde se registran dominio y puerto. */
-static void get_registry_file_path(char *path_buffer, DWORD path_buffer_size)
-{
-    DWORD temp_length = GetTempPath(path_buffer_size, path_buffer);
-
-    if (temp_length == 0 || temp_length >= path_buffer_size) {
-        lstrcpyn(path_buffer, REGISTRY_FILE_NAME, path_buffer_size);
-        return;
-    }
-
-    lstrcat(path_buffer, REGISTRY_FILE_NAME);
-}
-
-/* Obtiene la ruta del archivo temporal usado para reescribir el registro. */
-static void get_registry_temp_file_path(char *path_buffer, DWORD path_buffer_size)
-{
-    DWORD temp_length = GetTempPath(path_buffer_size, path_buffer);
-
-    if (temp_length == 0 || temp_length >= path_buffer_size) {
-        lstrcpyn(path_buffer, "socket_gui_servers.tmp", path_buffer_size);
-        return;
-    }
-
-    lstrcat(path_buffer, "socket_gui_servers.tmp");
-}
-
-/*
- * Bloquea el registro local para que varias instancias no escriban
- * socket_gui_servers.txt al mismo tiempo.
- */
-static HANDLE lock_registry(void)
-{
-    HANDLE mutex_handle = CreateMutex(NULL, FALSE, REGISTRY_MUTEX_NAME);
-
-    if (mutex_handle != NULL) {
-        WaitForSingleObject(mutex_handle, INFINITE);
-    }
-
-    return mutex_handle;
-}
-
-/* Libera el mutex del registro local. */
-static void unlock_registry(HANDLE mutex_handle)
-{
-    if (mutex_handle != NULL) {
-        ReleaseMutex(mutex_handle);
-        CloseHandle(mutex_handle);
-    }
-}
-
-/*
- * Busca un dominio en el registro.
- * Esta version asume que el mutex ya fue tomado por el llamador.
- */
-static int registry_lookup_domain_unlocked(const char *domain, int *port)
-{
-    char registry_path[MAX_PATH];
-    FILE *registry_file;
-    char line[256];
-    char stored_domain[128];
-    int stored_port;
-
-    get_registry_file_path(registry_path, sizeof(registry_path));
-    registry_file = fopen(registry_path, "r");
-
-    if (registry_file == NULL) {
-        return 0;
-    }
-
-    while (fgets(line, sizeof(line), registry_file) != NULL) {
-        if (sscanf(line, "%127[^|]|%d", stored_domain, &stored_port) == 2 &&
-            strcmp(stored_domain, domain) == 0) {
-            *port = stored_port;
-            fclose(registry_file);
-            return 1;
-        }
-    }
-
-    fclose(registry_file);
-    return 0;
-}
-
-/*
- * Busca si un puerto ya esta registrado por otro servidor.
- * Evita que dos dominios distintos apunten al mismo 127.0.0.1:puerto.
- */
-static int registry_lookup_port_unlocked(int port, char *domain_buffer, int domain_buffer_size)
-{
-    char registry_path[MAX_PATH];
-    FILE *registry_file;
-    char line[256];
-    char stored_domain[128];
-    int stored_port;
-
-    get_registry_file_path(registry_path, sizeof(registry_path));
-    registry_file = fopen(registry_path, "r");
-
-    if (registry_file == NULL) {
-        return 0;
-    }
-
-    while (fgets(line, sizeof(line), registry_file) != NULL) {
-        if (sscanf(line, "%127[^|]|%d", stored_domain, &stored_port) == 2 &&
-            stored_port == port) {
-            lstrcpyn(domain_buffer, stored_domain, domain_buffer_size);
-            fclose(registry_file);
-            return 1;
-        }
-    }
-
-    fclose(registry_file);
-    return 0;
-}
-
-/* Busca el puerto asociado a un dominio tomando y liberando el mutex. */
-static int registry_lookup_domain(const char *domain, int *port)
-{
-    int found;
-    HANDLE mutex_handle = lock_registry();
-
-    found = registry_lookup_domain_unlocked(domain, port);
-    unlock_registry(mutex_handle);
-
-    return found;
-}
-
-/*
- * Registra un servidor local.
- * Falla si ya existe el dominio o si otro dominio ya usa el mismo puerto.
- */
-static int registry_register_domain(const char *domain, int port)
-{
-    char registry_path[MAX_PATH];
-    FILE *registry_file;
-    int existing_port = 0;
-    char existing_domain[128];
-    HANDLE mutex_handle = lock_registry();
-
-    if (registry_lookup_domain_unlocked(domain, &existing_port)) {
-        unlock_registry(mutex_handle);
-        return REGISTRY_DOMAIN_EXISTS;
-    }
-
-    if (registry_lookup_port_unlocked(port, existing_domain, sizeof(existing_domain))) {
-        unlock_registry(mutex_handle);
-        return REGISTRY_PORT_EXISTS;
-    }
-
-    get_registry_file_path(registry_path, sizeof(registry_path));
-    registry_file = fopen(registry_path, "a");
-
-    if (registry_file == NULL) {
-        unlock_registry(mutex_handle);
-        return REGISTRY_WRITE_ERROR;
-    }
-
-    fprintf(registry_file, "%s|%d\n", domain, port);
-    fclose(registry_file);
-    unlock_registry(mutex_handle);
-    return REGISTRY_OK;
-}
-
-/* Elimina del registro el dominio del servidor que se apago. */
-static void registry_unregister_domain(const char *domain)
-{
-    char registry_path[MAX_PATH];
-    char temporary_path[MAX_PATH];
-    FILE *registry_file;
-    FILE *temporary_file;
-    char line[256];
-    char stored_domain[128];
-    int stored_port;
-    HANDLE mutex_handle = lock_registry();
-
-    get_registry_file_path(registry_path, sizeof(registry_path));
-    get_registry_temp_file_path(temporary_path, sizeof(temporary_path));
-
-    registry_file = fopen(registry_path, "r");
-
-    if (registry_file == NULL) {
-        unlock_registry(mutex_handle);
-        return;
-    }
-
-    temporary_file = fopen(temporary_path, "w");
-
-    if (temporary_file == NULL) {
-        fclose(registry_file);
-        unlock_registry(mutex_handle);
-        return;
-    }
-
-    while (fgets(line, sizeof(line), registry_file) != NULL) {
-        if (sscanf(line, "%127[^|]|%d", stored_domain, &stored_port) == 2 &&
-            strcmp(stored_domain, domain) == 0) {
-            continue;
-        }
-
-        fputs(line, temporary_file);
-    }
-
-    fclose(registry_file);
-    fclose(temporary_file);
-    DeleteFile(registry_path);
-    MoveFile(temporary_path, registry_path);
-    unlock_registry(mutex_handle);
 }
 
 /*
@@ -546,7 +274,7 @@ static DWORD WINAPI server_listener_thread(LPVOID parameter)
                 break;
             }
 
-            if (!message_is_control(receive_buffer)) {
+            if (!gui_message_is_control(receive_buffer)) {
                 char display_message[MESSAGE_BUFFER_SIZE + 32];
                 snprintf(display_message, sizeof(display_message), "Cliente: %s", receive_buffer);
                 post_log(display_message);
@@ -603,7 +331,7 @@ static DWORD WINAPI client_receiver_thread(LPVOID parameter)
             break;
         }
 
-        if (!message_is_control(receive_buffer)) {
+        if (!gui_message_is_control(receive_buffer)) {
             char display_message[MESSAGE_BUFFER_SIZE + 32];
             snprintf(display_message, sizeof(display_message), "Servidor: %s", receive_buffer);
             post_log(display_message);
@@ -613,73 +341,6 @@ static DWORD WINAPI client_receiver_thread(LPVOID parameter)
     close_active_connection();
     PostMessage(g_app.window, WM_APP_CONNECTION_ENDED, APP_MODE_CLIENT, 0);
     return 0;
-}
-
-/*
- * Crea el socket pasivo del servidor.
- * SO_EXCLUSIVEADDRUSE impide que dos servidores usen el mismo puerto.
- */
-static int create_listener_socket(int port, SOCKET *listener_socket)
-{
-    SOCKET socket_descriptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    struct sockaddr_in server_address;
-    int exclusive_address_enabled = 1;
-
-    if (socket_descriptor == INVALID_SOCKET) {
-        return 0;
-    }
-
-    setsockopt(socket_descriptor,
-               SOL_SOCKET,
-               SO_EXCLUSIVEADDRUSE,
-               (const char *)&exclusive_address_enabled,
-               sizeof(exclusive_address_enabled));
-
-    memset(&server_address, 0, sizeof(server_address));
-    server_address.sin_family = AF_INET;
-    server_address.sin_addr.s_addr = htonl(INADDR_ANY);
-    server_address.sin_port = htons((unsigned short)port);
-
-    if (bind(socket_descriptor, (struct sockaddr *)&server_address, sizeof(server_address)) == SOCKET_ERROR) {
-        closesocket(socket_descriptor);
-        return 0;
-    }
-
-    if (listen(socket_descriptor, PENDING_CONNECTIONS) == SOCKET_ERROR) {
-        closesocket(socket_descriptor);
-        return 0;
-    }
-
-    *listener_socket = socket_descriptor;
-    return 1;
-}
-
-/* Crea el socket del cliente y solicita conexion al servidor local. */
-static int create_client_socket(const char *host, int port, SOCKET *client_socket)
-{
-    SOCKET socket_descriptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    struct sockaddr_in server_address;
-
-    if (socket_descriptor == INVALID_SOCKET) {
-        return 0;
-    }
-
-    memset(&server_address, 0, sizeof(server_address));
-    server_address.sin_family = AF_INET;
-    server_address.sin_port = htons((unsigned short)port);
-
-    if (inet_pton(AF_INET, host, &server_address.sin_addr) <= 0) {
-        closesocket(socket_descriptor);
-        return 0;
-    }
-
-    if (connect(socket_descriptor, (struct sockaddr *)&server_address, sizeof(server_address)) == SOCKET_ERROR) {
-        closesocket(socket_descriptor);
-        return 0;
-    }
-
-    *client_socket = socket_descriptor;
-    return 1;
 }
 
 /* Lee dominio/puerto de la UI, registra el servidor y empieza a escuchar. */
@@ -718,7 +379,7 @@ static void start_server(void)
         return;
     }
 
-    if (!create_listener_socket(port, &listener_socket)) {
+    if (!gui_create_listener_socket(port, &listener_socket)) {
         registry_unregister_domain(domain);
         MessageBox(g_app.window, "No se pudo crear el servidor. Revise si el puerto ya esta ocupado.", APP_TITLE, MB_ICONERROR);
         return;
@@ -766,7 +427,7 @@ static void connect_client(void)
         return;
     }
 
-    if (!create_client_socket("127.0.0.1", port, &client_socket)) {
+    if (!gui_create_client_socket("127.0.0.1", port, &client_socket)) {
         MessageBox(g_app.window, "No se pudo conectar al servidor.", APP_TITLE, MB_ICONERROR);
         return;
     }
@@ -871,7 +532,7 @@ static void send_message_from_ui(void)
         return;
     }
 
-    if (!message_is_ascii(message)) {
+    if (!gui_message_is_ascii(message)) {
         MessageBox(g_app.window, "El mensaje debe contener solo caracteres ASCII.", APP_TITLE, MB_ICONWARNING);
         return;
     }
