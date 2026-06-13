@@ -84,6 +84,9 @@ typedef struct {
 /* Estado global unico de esta instancia de ventana. */
 static AppState g_app;
 
+/* Accion de cliente usada por botones y por decisiones ante servidores activos. */
+static void connect_client(void);
+
 /* Duplica texto para pasarlo de forma segura por PostMessage(). */
 static char *duplicate_text(const char *text)
 {
@@ -230,6 +233,29 @@ static int send_text_to_active_socket(const char *message)
 }
 
 /*
+ * Comprueba si un puerto puede usarse como servidor local.
+ * Se usa para diferenciar registros viejos de servidores realmente activos.
+ */
+static int can_open_server_port(int port)
+{
+    SOCKET probe_socket;
+
+    if (!gui_create_listener_socket(port, &probe_socket)) {
+        return 0;
+    }
+
+    closesocket(probe_socket);
+    return 1;
+}
+
+/* Cambia la UI al dominio registrado y entra como cliente. */
+static void connect_to_registered_server(const char *domain)
+{
+    SetWindowText(g_app.domain_edit, domain);
+    connect_client();
+}
+
+/*
  * Hilo del servidor grafico.
  * Espera clientes con accept(), atiende uno a la vez y deja a los demas
  * en la cola de listen() hasta que el cliente actual termine.
@@ -349,6 +375,8 @@ static void start_server(void)
     char domain[128];
     char port_text[32];
     int port;
+    int registered_port;
+    char registered_domain[128];
     int registry_result;
     SOCKET listener_socket;
     char status_message[256];
@@ -360,6 +388,81 @@ static void start_server(void)
     if (domain[0] == '\0' || port <= 0 || port > 65535) {
         MessageBox(g_app.window, "Ingrese dominio y puerto validos.", APP_TITLE, MB_ICONWARNING);
         return;
+    }
+
+    /*
+     * Si hay una entrada previa con el mismo dominio, se revisa si el
+     * servidor sigue vivo. Si el puerto esta libre, era un registro viejo.
+     */
+    if (registry_lookup_domain(domain, &registered_port)) {
+        if (can_open_server_port(registered_port)) {
+            char question[320];
+
+            snprintf(question,
+                     sizeof(question),
+                     "Ya habia un servidor registrado como '%s' en el puerto %d, pero no esta encendido.\n\nDesea encenderlo ahora?",
+                     domain,
+                     registered_port);
+
+            if (MessageBox(g_app.window, question, APP_TITLE, MB_YESNO | MB_ICONQUESTION) != IDYES) {
+                return;
+            }
+
+            registry_unregister_domain(domain);
+            port = registered_port;
+            snprintf(port_text, sizeof(port_text), "%d", port);
+            SetWindowText(g_app.port_edit, port_text);
+        } else {
+            char question[320];
+
+            snprintf(question,
+                     sizeof(question),
+                     "Ya existe un servidor activo como '%s' en el puerto %d.\n\nDesea entrar como cliente?",
+                     domain,
+                     registered_port);
+
+            if (MessageBox(g_app.window, question, APP_TITLE, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                connect_to_registered_server(domain);
+            }
+
+            return;
+        }
+    }
+
+    /*
+     * Si el puerto pertenece a otro dominio registrado, tambien se valida si
+     * ese servidor existe o si solo quedo una entrada vieja en el archivo.
+     */
+    if (registry_lookup_port(port, registered_domain, sizeof(registered_domain))) {
+        if (can_open_server_port(port)) {
+            char question[360];
+
+            snprintf(question,
+                     sizeof(question),
+                     "El puerto %d estaba registrado para '%s', pero ese servidor no esta encendido.\n\nDesea liberar ese registro y crear este servidor?",
+                     port,
+                     registered_domain);
+
+            if (MessageBox(g_app.window, question, APP_TITLE, MB_YESNO | MB_ICONQUESTION) != IDYES) {
+                return;
+            }
+
+            registry_unregister_port(port);
+        } else {
+            char question[360];
+
+            snprintf(question,
+                     sizeof(question),
+                     "Ya existe un servidor activo en el puerto %d con dominio '%s'.\n\nDesea entrar como cliente?",
+                     port,
+                     registered_domain);
+
+            if (MessageBox(g_app.window, question, APP_TITLE, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                connect_to_registered_server(registered_domain);
+            }
+
+            return;
+        }
     }
 
     registry_result = registry_register_domain(domain, port);

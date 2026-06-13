@@ -139,6 +139,17 @@ int registry_lookup_domain(const char *domain, int *port)
     return found;
 }
 
+int registry_lookup_port(int port, char *domain_buffer, int domain_buffer_size)
+{
+    int found;
+    HANDLE mutex_handle = lock_registry();
+
+    found = registry_lookup_port_unlocked(port, domain_buffer, domain_buffer_size);
+    unlock_registry(mutex_handle);
+
+    return found;
+}
+
 int registry_register_domain(const char *domain, int port)
 {
     char registry_path[MAX_PATH];
@@ -203,6 +214,51 @@ void registry_unregister_domain(const char *domain)
     while (fgets(line, sizeof(line), registry_file) != NULL) {
         if (sscanf(line, "%127[^|]|%d", stored_domain, &stored_port) == 2 &&
             strcmp(stored_domain, domain) == 0) {
+            continue;
+        }
+
+        fputs(line, temporary_file);
+    }
+
+    fclose(registry_file);
+    fclose(temporary_file);
+    DeleteFile(registry_path);
+    MoveFile(temporary_path, registry_path);
+    unlock_registry(mutex_handle);
+}
+
+void registry_unregister_port(int port)
+{
+    char registry_path[MAX_PATH];
+    char temporary_path[MAX_PATH];
+    FILE *registry_file;
+    FILE *temporary_file;
+    char line[256];
+    char stored_domain[128];
+    int stored_port;
+    HANDLE mutex_handle = lock_registry();
+
+    get_registry_file_path(registry_path, sizeof(registry_path));
+    get_registry_temp_file_path(temporary_path, sizeof(temporary_path));
+
+    registry_file = fopen(registry_path, "r");
+
+    if (registry_file == NULL) {
+        unlock_registry(mutex_handle);
+        return;
+    }
+
+    temporary_file = fopen(temporary_path, "w");
+
+    if (temporary_file == NULL) {
+        fclose(registry_file);
+        unlock_registry(mutex_handle);
+        return;
+    }
+
+    while (fgets(line, sizeof(line), registry_file) != NULL) {
+        if (sscanf(line, "%127[^|]|%d", stored_domain, &stored_port) == 2 &&
+            stored_port == port) {
             continue;
         }
 
